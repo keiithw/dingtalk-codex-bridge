@@ -1,0 +1,11 @@
+node_modules/
+*.lnk
+*.log
+bridge-config.json
+bridge-state.json
+bridge-model.json
+bridge-monitor.json
+console-instance.json
+*.request
+.env
+*.tmp
