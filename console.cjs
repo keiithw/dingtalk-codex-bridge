@@ -5,6 +5,7 @@ const path=require('node:path');
 const crypto=require('node:crypto');
 const {spawn,execFile,execFileSync}=require('node:child_process');
 const readline=require('node:readline');
+const {createArchive}=require('./mention-archive.cjs');
 const secret=crypto.randomBytes(32).toString('hex');
 // 新安装使用用户数据目录；旧安装沿用原配置，避免影响已有桥接。
 const legacyConfig=path.resolve(__dirname,'../../work/bridge-config.json');
@@ -13,6 +14,7 @@ const resolvedConfig=process.env.BRIDGE_CONFIG|| (fs.existsSync(legacyConfig)?le
 const statusFile=path.join(path.dirname(resolvedConfig),'bridge-monitor.json');
 const newPrivateSessionPath=path.join(path.dirname(statusFile),'new-private-session.request');
 const configFile=resolvedConfig;
+const mentionArchive=createArchive(path.dirname(statusFile));
 const modelSelectionPath=path.join(path.dirname(statusFile),'bridge-model.json');
 const instanceFile=path.join(path.dirname(statusFile),'console-instance.json');
 const page=fs.readFileSync(path.join(__dirname,'console.html'));
@@ -86,6 +88,13 @@ const server=http.createServer((req,res)=>{
     try{const data=JSON.parse(fs.readFileSync(statusFile,'utf8'));data.stale=Date.now()-Date.parse(data.updatedAt)>45000;res.setHeader('Content-Type','application/json; charset=utf-8');res.end(JSON.stringify(data));}
     catch{res.setHeader('Content-Type','application/json; charset=utf-8');res.end(JSON.stringify({stale:true,events:[]}));}return;
   }
+  // 仅经本机令牌授权后返回归档及其被索引的图片。
+  if(req.method==='GET' && req.url==='/mentions'){
+    try{res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify({messages:mentionArchive.list(),directory:mentionArchive.dir}));}catch{res.writeHead(500);res.end();}return;
+  }
+  if(req.method==='GET' && req.url.startsWith('/mention-image/')){
+    try{const image=mentionArchive.image(req.url.slice('/mention-image/'.length));if(!image){res.writeHead(404);res.end();return}res.writeHead(200,{'Content-Type':image.mime});fs.createReadStream(image.path).on('error',()=>res.destroy()).pipe(res);}catch{res.writeHead(500);res.end();}return;
+  }
   if(req.method==='GET' && req.url==='/threads'){
     listBridgeThreads().then(data=>{res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data))}).catch(()=>{res.writeHead(500,{'Content-Type':'application/json'});res.end(JSON.stringify({error:'历史会话读取失败'}))});return;
   }
@@ -95,6 +104,14 @@ const server=http.createServer((req,res)=>{
   }
   if(req.method==='POST' && req.url==='/model'){
     let raw='';req.on('data',part=>{raw+=part;if(raw.length>2048)req.destroy()});req.on('end',async()=>{try{const {model,effort=''}=JSON.parse(raw);if(typeof model!=='string'||model.length>200||typeof effort!=='string'||effort.length>40)throw Error();const catalog=await listBridgeThreads('models');const selected=catalog.models.find(m=>m.id===model);if(model&&!selected)throw Error();if(effort&&(!selected||!selected.efforts.some(e=>e.value===effort)))throw Error();const tmp=modelSelectionPath+'.tmp';fs.writeFileSync(tmp,JSON.stringify({model,effort}),'utf8');fs.renameSync(tmp,modelSelectionPath);res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({ok:true}))}catch{res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({ok:false}))}});return;
+  }
+  // 换号后排队新建私聊并重启进程；正在运行的任务不被中断。
+  if(req.method==='POST' && req.url==='/refresh-account'){
+    try{const status=JSON.parse(fs.readFileSync(statusFile,'utf8'));if(status.active>0){res.writeHead(409,{'Content-Type':'application/json'});res.end(JSON.stringify({message:'有任务正在处理，请完成后再刷新账号。'}));return;}
+      fs.writeFileSync(newPrivateSessionPath,'requested\n',{encoding:'utf8',flag:'w'});
+      const executable=path.join(process.env.SystemRoot,'System32','schtasks.exe');
+      execFile(executable,['/end','/tn','\\CodexDingTalkBridge'],()=>execFile(executable,['/run','/tn','\\CodexDingTalkBridge'],error=>{res.writeHead(error?500:202,{'Content-Type':'application/json'});res.end(JSON.stringify({ok:!error,message:error?'启动失败，请检查计划任务；新会话请求已保留。':'已请求重启，下一条私聊将开启新会话。'}))}));
+    }catch{res.writeHead(500,{'Content-Type':'application/json'});res.end(JSON.stringify({message:'读取桥接状态失败，请检查桥接配置。'}));}return;
   }
   if(req.method==='POST' && req.url==='/restart'){
     const executable=path.join(process.env.SystemRoot,'System32','schtasks.exe');
