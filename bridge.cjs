@@ -142,6 +142,8 @@ async function getGroupMembers(group) {
 }
 const pending = new Map();
 const active = new Map();
+// 编号选择只在当前私聊内短期有效，避免普通数字消息误触发历史会话或模型切换。
+const privateSelections = new Map();
 // 控制请求仅接受当前私聊任务的临时令牌，任务结束即失效。
 const controlPath=path.join(path.dirname(configPath),'bridge-control');
 const controlTokens=new Map();
@@ -279,6 +281,68 @@ function chooseAcknowledgement(text, imageMessage) {
   const selected=options[Math.floor(Math.random()*options.length)];
   return /——《(?:道德经|庄子|荀子)/.test(selected) ? 'Codex 正在思考...\n'+selected : selected;
 }
+async function listPrivateOptions(kind) {
+  let cursor=null;
+  const options=[];
+  let pages=0;
+  do {
+    const method=kind==='threads' ? 'thread/list' : 'model/list';
+    const params=kind==='threads'
+      ? {cwd:cfg.cwd,sourceKinds:['vscode'],sortKey:'updated_at',limit:100,cursor}
+      : {limit:100,cursor};
+    const result=await rpc(method,params);
+    for(const item of result.data||[]) {
+      if(kind==='threads') {
+        if(item.originator==='dingtalk_codex_bridge') options.push({id:item.id,title:(item.name||item.preview||'未命名会话').slice(0,80)});
+      } else if(!item.hidden) {
+        options.push({id:item.model||item.id,name:item.displayName||item.model||item.id,efforts:item.supportedReasoningEfforts||[],defaultEffort:item.defaultReasoningEffort});
+      }
+    }
+    cursor=result.nextCursor;
+    pages++;
+  } while(cursor&&pages<10);
+  return options.slice(0,10);
+}
+function selectionMessage(title,options,detail) {
+  return title+'：\n'+(options.length ? options.map((item,index)=>`${index+1}. ${item.title||item.name}${item.defaultEffort?'（默认推理：'+item.defaultEffort+'）':''}`).join('\n') : '暂无可选项。')
+    +(options.length?'\n请回复编号选择。':'')+(detail?'\n'+detail:'');
+}
+async function handlePrivateSelection(message,key,text) {
+  if(message.conversationType!=='1' || message.msgtype==='picture' || message.msgType==='picture') return false;
+  const existing=privateSelections.get(key);
+  if(existing && existing.expiresAt>Date.now() && /^\d+$/.test(text)) {
+    const index=Number(text)-1;
+    if(index<0||index>=existing.options.length) {await reply(message,'编号无效，请回复 '+existing.options.map((_,i)=>i+1).join('、')+'。'); return true;}
+    const selected=existing.options[index];
+    privateSelections.delete(key);
+    if(existing.kind==='threads') {
+      const result=await rpc('thread/read',{threadId:selected.id,includeTurns:false});
+      if(result.thread?.originator!=='dingtalk_codex_bridge') {await reply(message,'会话不属于本桥接，未切换。'); return true;}
+      state.threads[key]=selected.id; save();
+      await reply(message,'已切换到历史会话「'+selected.title+'」。下一条普通消息将继续该会话。');
+      return true;
+    }
+    const tmp=modelSelectionPath+'.tmp';
+    fs.writeFileSync(tmp,JSON.stringify({model:selected.id,effort:selected.defaultEffort||''}),'utf8');
+    fs.renameSync(tmp,modelSelectionPath);
+    await reply(message,'已切换模型「'+selected.name+'」。下一条普通消息开始生效。');
+    return true;
+  }
+  if(existing && existing.expiresAt<=Date.now()) privateSelections.delete(key);
+  if(text==='历史会话'||text==='会话列表') {
+    const options=await listPrivateOptions('threads');
+    privateSelections.set(key,{kind:'threads',options,expiresAt:Date.now()+10*60*1000});
+    await reply(message,selectionMessage('历史会话',options,'编号仅对本次列表有效。'));
+    return true;
+  }
+  if(text==='模型列表'||text==='模型') {
+    const options=await listPrivateOptions('models');
+    privateSelections.set(key,{kind:'models',options,expiresAt:Date.now()+10*60*1000});
+    await reply(message,selectionMessage('可用模型',options,'编号仅对本次列表有效。'));
+    return true;
+  }
+  return false;
+}
 async function handle(message) {
   const {text,codes,imageMessage}=extractMessage(message); if (!text && !imageMessage) return;
   const sender=message.senderStaffId || message.senderId;
@@ -288,6 +352,9 @@ async function handle(message) {
     state.owner=sender; save(); await reply(message,'配对成功。请发送：你好，只回复“链路已打通”。'); return;
   }
   if (sender!==state.owner) return;
+  const key=message.conversationId+':'+sender;
+  // 列表和编号切换在桥接层完成，避免将控制命令交给 Codex。
+  if (!imageMessage && await handlePrivateSelection(message,key,text)) return;
   // 图片下载失败时明确告知用户，不把缺失的图片当作成功处理。
   if (imageMessage && (!codes.length || codes.length>5)) {await reply(message,codes.length>5 ? '单条消息最多支持 5 张图片。' : '未收到图片下载码，请重新发送。'); return;}
   // 群登记仅由配对用户触发，重复群名保留多个标识以避免误发。
@@ -335,7 +402,6 @@ async function handle(message) {
       return;
     }
   }
-  const key=message.conversationId+':'+sender;
   // 控制台请求仅作用于下一条已绑定账号的私聊消息，按队列顺序生效。
   if (message.conversationType === '1' && fs.existsSync(newPrivateSessionPath)) {
     // 恢复请求必须指向本桥接创建的会话；旧式请求表示创建新会话。
