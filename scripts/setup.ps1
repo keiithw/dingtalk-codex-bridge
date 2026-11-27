@@ -38,6 +38,12 @@ $pairCode = ([BitConverter]::ToString($bytes)).Replace('-','').ToLowerInvariant(
 $settings = [ordered]@{clientId='';clientSecret='';pairCode=$pairCode;codexExe=(Resolve-Path -LiteralPath $CodexExe).Path;cwd=$workspacePath;writableRoots=@()}
 $json = $settings | ConvertTo-Json -Depth 5
 [IO.File]::WriteAllText($config, $json, (New-Object System.Text.UTF8Encoding($false)))
+$state = [ordered]@{owner=$null;threads=@{};seen=@();groups=@{}} | ConvertTo-Json -Depth 5
+$assistants = [ordered]@{assistants=@()} | ConvertTo-Json -Depth 5
+$mentionGroups = @() | ConvertTo-Json
+[IO.File]::WriteAllText((Join-Path $dataDir 'bridge-state.json'), $state, (New-Object System.Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText((Join-Path $dataDir 'external-assistants.json'), $assistants, (New-Object System.Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText((Join-Path $dataDir 'robot-mentions-groups.json'), $mentionGroups, (New-Object System.Text.UTF8Encoding($false)))
 Write-Output 'Setup complete. Open scripts\open-console.cmd and configure your robot in the settings dialog.'
 Write-Output ('Private pairing code: ' + $pairCode)
 Write-Output 'Pairing code is also stored in your protected local configuration. Do not share it publicly.'
