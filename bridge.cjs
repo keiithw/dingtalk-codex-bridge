@@ -304,7 +304,7 @@ async function listPrivateOptions(kind) {
   return options.slice(0,10);
 }
 function selectionMessage(title,options,detail) {
-  return title+'：\n'+(options.length ? options.map((item,index)=>`${index+1}. ${item.title||item.name}${item.defaultEffort?'（默认推理：'+item.defaultEffort+'）':''}`).join('\n') : '暂无可选项。')
+  return title+'：\n'+(options.length ? options.map((item,index)=>`${index+1}. ${item.title||item.name||item.label}${item.defaultEffort?'（默认推理：'+item.defaultEffort+'）':''}`).join('\n') : '暂无可选项。')
     +(options.length?'\n请回复编号选择。':'')+(detail?'\n'+detail:'');
 }
 async function handlePrivateSelection(message,key,text) {
@@ -322,10 +322,26 @@ async function handlePrivateSelection(message,key,text) {
       await reply(message,'已切换到历史会话「'+selected.title+'」。下一条普通消息将继续该会话。');
       return true;
     }
+    if(existing.kind==='efforts') {
+      const effort=existing.options[index];
+      const tmp=modelSelectionPath+'.tmp';
+      fs.writeFileSync(tmp,JSON.stringify({model:existing.model.id,effort:effort.value}),'utf8');
+      fs.renameSync(tmp,modelSelectionPath);
+      privateSelections.delete(key);
+      await reply(message,'已切换模型「'+existing.model.name+'」，推理强度为「'+effort.label+'」。下一条普通消息开始生效。');
+      return true;
+    }
     const tmp=modelSelectionPath+'.tmp';
-    fs.writeFileSync(tmp,JSON.stringify({model:selected.id,effort:selected.defaultEffort||''}),'utf8');
+    const efforts=(selected.efforts||[]).map(item=>({value:item.reasoningEffort||item.value,label:item.description||item.reasoningEffort||item.value})).filter(item=>item.value);
+    if(efforts.length) {
+      privateSelections.set(key,{kind:'efforts',model:selected,options:efforts,expiresAt:Date.now()+10*60*1000});
+      await reply(message,selectionMessage('模型「'+selected.name+'」的推理强度',efforts,'请回复编号选择；选择后下一条普通消息生效。'));
+      return true;
+    }
+    fs.writeFileSync(tmp,JSON.stringify({model:selected.id,effort:''}),'utf8');
     fs.renameSync(tmp,modelSelectionPath);
-    await reply(message,'已切换模型「'+selected.name+'」。下一条普通消息开始生效。');
+    privateSelections.delete(key);
+    await reply(message,'已切换模型「'+selected.name+'」。该模型未返回可选推理强度，下一条普通消息开始生效。');
     return true;
   }
   if(existing && existing.expiresAt<=Date.now()) privateSelections.delete(key);
